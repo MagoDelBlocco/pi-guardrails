@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as path from "node:path";
 import * as os from "node:os";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { createRequire } from "node:module";
 
 // jiti (pi's TS loader) can't handle .node binaries — use createRequire
@@ -77,10 +77,78 @@ function checkBashCommand(command: string, cwd: string): Violation[] | null {
 	return parseViolations(raw);
 }
 
+// ── Tirith integration ────────────────────────────────────────
+// Calls `tirith check --json --non-interactive <cmd>` to run URL-based
+// security analysis (download-and-execute, cloaking, etc.).
+
+function checkTirith(command: string): Violation[] | null {
+	if (!tirithBinary) return null;
+
+	try {
+		const output = execSync(
+			`"${tirithBinary}" check --json --non-interactive ${JSON.stringify(command)}`,
+			{ encoding: "utf-8", cwd: homeDir },
+		);
+		const result = JSON.parse(output);
+
+		if (result.findings && result.findings.length > 0) {
+			return result.findings.map((f: any) => ({
+				category: f.rule_id,
+				severity:
+					f.severity === "HIGH" || f.severity === "CRITICAL"
+						? "critical"
+						: "warning",
+				message: `${f.title}: ${f.description.split("\n")[0]}`,
+			}));
+		}
+	} catch (err: any) {
+		// tirith returns exit code 1 on block — that's expected.
+		// Only log if it's a genuine failure (e.g., binary missing).
+		if (err.status !== 1) {
+			// silent — tirith unavailable
+		}
+		// If status === 1, parse stdout for findings (JSON goes to stdout even on block).
+		if (err.stdout) {
+			try {
+				const result = JSON.parse(err.stdout);
+				if (result.findings && result.findings.length > 0) {
+					return result.findings.map((f: any) => ({
+						category: f.rule_id,
+						severity:
+							f.severity === "HIGH" || f.severity === "CRITICAL"
+								? "critical"
+								: "warning",
+						message: `${f.title}: ${f.description.split("\n")[0]}`,
+					}));
+				}
+			} catch {
+				// not JSON — ignore
+			}
+		}
+	}
+
+	return null;
+}
+
 function formatViolationPrompt(violations: Violation[]): string {
 	return violations
 		.map((v) => `[${v.severity.toUpperCase()}] ${v.category}: ${v.message}`)
 		.join("\n");
+}
+
+// ── Desktop notification ──────────────────────────────────────
+// Fires a `notify-send` so the user gets a system-level alert when
+// guardrails prompts for permission.
+
+function notifyUser(summary: string, body: string): void {
+	try {
+		spawn("notify-send", [summary, body], {
+			detached: true,
+			stdio: "ignore",
+		}).unref();
+	} catch {
+		// notify-send not available — silently skip.
+	}
 }
 
 // ── Extension ──────────────────────────────────────────────────
@@ -114,6 +182,7 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					const prompt = formatViolationPrompt(violations);
+					notifyUser("Guardrail: permission needed", violations[0].message);
 					const allowed = await ctx.ui.confirm(
 						"Guardrail violation",
 						`${prompt}\n\nAllow access?`,
@@ -129,8 +198,14 @@ export default function (pi: ExtensionAPI) {
 		if (event.toolName === "bash") {
 			const command = (event.input as { command?: string }).command;
 			if (command) {
-				const violations = checkBashCommand(command, ctx.cwd);
-				if (violations) {
+				// Combine native guardrail checks with tirith URL analysis.
+				const violations: Violation[] = [];
+				const nativeViolations = checkBashCommand(command, ctx.cwd);
+				if (nativeViolations) violations.push(...nativeViolations);
+				const tirithViolations = checkTirith(command);
+				if (tirithViolations) violations.push(...tirithViolations);
+
+				if (violations.length > 0) {
 					const critical = violations.filter((v) => v.severity === "critical");
 					if (critical.length > 0) {
 						return {
@@ -141,6 +216,7 @@ export default function (pi: ExtensionAPI) {
 
 					const warnings = violations.filter((v) => v.severity === "warning");
 					const prompt = formatViolationPrompt(warnings);
+					notifyUser("Guardrail: permission needed", warnings[0].message);
 					const allowed = await ctx.ui.confirm(
 						"Guardrail violation",
 						`${prompt}\n\nAllow this command?`,

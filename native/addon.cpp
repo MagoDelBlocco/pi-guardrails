@@ -47,7 +47,7 @@ static std::string violationsToJson(const std::vector<Violation>& vs) {
 } // anonymous namespace
 
 /*
- * init(extensionRoot, piConfigDir, tirithBinary, homeDir)
+ * init(extensionRoot, piConfigDir, piInstallDir, tirithBinary)
  *
  * Called once at extension startup to cache protected paths.
  */
@@ -64,7 +64,7 @@ Napi::Value InitAddon(const Napi::CallbackInfo& info) {
  * checkPath(cwd, targetPath, operation, homeDir) -> string
  *
  * operation: "read" | "write" | "edit"
- * Checks: cwd-escape (Warning) + self-disabling (Critical).
+ * Checks: cwd-escape (Warning) + self-disabling (Warning).
  */
 Napi::String CheckPath(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();

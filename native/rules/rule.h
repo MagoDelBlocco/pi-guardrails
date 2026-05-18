@@ -55,13 +55,13 @@ std::vector<Violation> checkPackageManager(const std::string& command);
 //    Only find -delete, dd, shred — redirect checking moved to sensitive-paths.
 std::vector<Violation> checkFileDestruction(const std::string& command);
 
-// C. Sensitive-path writes via bash (Warning)
+// D. Sensitive-path writes via bash (Warning)
 //    Checks redirects, tee, heredoc, crontab, systemctl, launchctl against sensitive paths.
 std::vector<Violation> checkSensitivePaths(const std::string& command,
                                             const std::string& homeDir,
                                             const std::string& cwd);
 
-// D. Self-disabling protection (Critical, auto-block)
+// E. Self-disabling protection (Warning, user prompt)
 void initSelfDisabling(const std::string& extensionRoot,
                         const std::string& piConfigDir,
                         const std::string& piInstallDir,

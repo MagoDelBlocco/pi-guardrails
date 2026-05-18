@@ -3,14 +3,14 @@
 #include <algorithm>
 
 /*
- * Self-disabling protection (Critical, auto-block).
+ * Self-disabling protection (Warning, user prompt).
  *
  * Prevents the agent from modifying, removing, or bypassing anything
  * that controls the guardrail extension, pi itself, or tirith.
  *
  * Protected paths are resolved at init time and cached.
  * Any write, edit, rm, mv, cp, chmod, chown, chattr, ln, truncate,
- * or dd targeting these paths is auto-blocked.
+ * or dd targeting these paths triggers a user confirmation prompt.
  */
 
 namespace {
