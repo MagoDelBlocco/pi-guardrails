@@ -104,6 +104,14 @@ Napi::String CheckPath(const Napi::CallbackInfo& info) {
         all.insert(all.end(), selfViolations.begin(), selfViolations.end());
     }
 
+    // ── Sensitive-path check ──────────────────────────────────
+    // Catches writes to sensitive files (shell init, SSH keys, etc.)
+    // even when no bash command is involved (write/edit tool calls).
+    {
+        auto sensitiveViolations = checkSensitivePath(targetPath, operation, homeDir, cwd);
+        all.insert(all.end(), sensitiveViolations.begin(), sensitiveViolations.end());
+    }
+
     return Napi::String::New(env, violationsToJson(all));
 }
 

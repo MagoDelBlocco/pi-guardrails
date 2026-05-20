@@ -3,8 +3,7 @@
   "version": "0.1.0",
   "dependencies": {
     "@earendil-works/pi-coding-agent": "*",
-    "node-addon-api": "^8.0.0",
-    "typebox": "^1.1.24"
+    "node-addon-api": "^8.0.0"
   },
   "pi": {
     "extensions": ["./index.ts"]

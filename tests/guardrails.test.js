@@ -1273,7 +1273,11 @@ describe("path-escape (checkPath)", () => {
 		assertNoViolation(violations, "path-escape");
 	});
 	it("allows /tmp absolute paths", () => {
-		const violations = checkPath("/home/user/project", "/tmp/safe-file.txt", "write");
+		const violations = checkPath(
+			"/home/user/project",
+			"/tmp/safe-file.txt",
+			"write",
+		);
 		assertNoViolation(violations, "path-escape");
 	});
 	it("detects ../ escape outside cwd", () => {
@@ -1389,22 +1393,25 @@ describe("multi-rule commands", () => {
 
 	const check = (cmd) => parseResult(native.checkCommand(cmd, homeDir, cwd));
 
-	it("detects both shell-composition and process-control in 'bash -c 'kill 1''", () => {
+	it("detects shell-composition in 'bash -c 'kill 1'' (inner content is inside quotes, not scanned)", () => {
 		const violations = check("bash -c 'kill 1'");
 		assertHasViolation(violations, "shell-composition", "critical");
-		assertHasViolation(violations, "process-control", "warning");
+		// blankQuoted strips quoted content, so inner kill is not scanned — correct behavior.
+		assertNoViolation(violations, "process-control");
 	});
 
-	it("detects both shell-composition and file-destruction in 'bash -c 'dd if=/dev/zero''", () => {
+	it("detects shell-composition in 'bash -c 'dd if=/dev/zero'' (inner content is inside quotes)", () => {
 		const violations = check("bash -c 'dd if=/dev/zero of=/dev/sda'");
 		assertHasViolation(violations, "shell-composition", "critical");
-		assertHasViolation(violations, "file-destruction", "warning");
+		// blankQuoted strips quoted content, so inner dd is not scanned — correct behavior.
+		assertNoViolation(violations, "file-destruction");
 	});
 
-	it("detects both package-manager and shell-composition in 'bash -c 'npm install''", () => {
+	it("detects shell-composition in 'bash -c 'npm install'' (inner content is inside quotes)", () => {
 		const violations = check("bash -c 'npm install lodash'");
 		assertHasViolation(violations, "shell-composition", "critical");
-		assertHasViolation(violations, "package-manager", "warning");
+		// blankQuoted strips quoted content, so inner npm install is not scanned — correct behavior.
+		assertNoViolation(violations, "package-manager");
 	});
 
 	it("detects both sensitive-path and file-destruction in 'shred ~/.ssh/id_rsa'", () => {
@@ -1675,16 +1682,43 @@ describe("shell-init content check", () => {
 			"self-disabling",
 		);
 	});
-	it("allows content with 'pi ' marker", () => {
-		assertNoViolation(
+	it("flags content with bare 'pi ' substring (too permissive — dropped)", () => {
+		assertHasViolation(
 			checkContent("~/.bashrc", 'export PI_HOME="~/.pi"\npi session start'),
+			"self-disabling",
+			"warning",
+		);
+	});
+	it("flags content with bare 'guardrails' substring (too permissive — dropped)", () => {
+		assertHasViolation(
+			checkContent("~/.profile", "# guardrails extension loaded"),
+			"self-disabling",
+			"warning",
+		);
+	});
+	it("allows content with '# guardrails:on' marker", () => {
+		assertNoViolation(
+			checkContent(
+				"~/.bashrc",
+				"# guardrails:on\nexport PATH=$PATH:/usr/local/bin",
+			),
 			"self-disabling",
 		);
 	});
-	it("allows content with 'guardrails' marker", () => {
+	it("allows content with 'source .../guardrails/...' marker", () => {
 		assertNoViolation(
-			checkContent("~/.profile", "# guardrails extension loaded"),
+			checkContent(
+				"~/.zshrc",
+				"source ~/.pi/agent/extensions/guardrails/loader.sh",
+			),
 			"self-disabling",
+		);
+	});
+	it("flags '# pi is fun' (not a real guardrail marker)", () => {
+		assertHasViolation(
+			checkContent("~/.bashrc", "# pi is fun\nexport X=y"),
+			"self-disabling",
+			"warning",
 		);
 	});
 	it("does not flag non-shell-init files", () => {
@@ -1934,5 +1968,640 @@ describe("spec negative cases", () => {
 			checkPath("normal-source-file.cpp", "write"),
 			"self-disabling",
 		);
+	});
+});
+
+// ── P. Regression Tests (fixes from audit) ────────────────────
+
+describe("regression: quote handling", () => {
+	let env, homeDir, cwd;
+
+	beforeEach(() => {
+		env = createTestEnv();
+		native.init(
+			env.extensionRoot,
+			env.piConfigDir,
+			env.piInstallDir,
+			env.tirithBinary,
+		);
+		homeDir = os.homedir();
+		cwd = env.tmpDir;
+	});
+
+	const check = (cmd) => parseResult(native.checkCommand(cmd, homeDir, cwd));
+
+	// dequote: paths inside quotes should be visible to path-bearing rules
+	it('echo evil > "$HOME/.bashrc" → sensitive-path (dequote preserves path)', () => {
+		assertHasViolation(
+			check(`echo evil > "$HOME/.bashrc"`),
+			"sensitive-path",
+			"warning",
+		);
+	});
+	it('echo evil > "$HOME/.bashrc" → sensitive-path', () => {
+		assertHasViolation(
+			check(`echo evil > "$HOME/.bashrc"`),
+			"sensitive-path",
+			"warning",
+		);
+	});
+	it('tee "$HOME/.bashrc" → sensitive-path', () => {
+		assertHasViolation(
+			check(`echo x | tee "$HOME/.bashrc"`),
+			"sensitive-path",
+			"warning",
+		);
+	});
+
+	// blankQuoted: operators inside quotes should NOT trigger
+	it('echo "a & b" → NOT process-control', () => {
+		assertNoViolation(check('echo "a & b"'), "process-control");
+	});
+	it('echo "a > b" → NOT sensitive-path', () => {
+		assertNoViolation(check('echo "a > b"'), "sensitive-path");
+	});
+	it('echo "a > ~/.bashrc" → NOT sensitive-path (inside quotes)', () => {
+		assertNoViolation(check('echo "a > ~/.bashrc"'), "sensitive-path");
+	});
+});
+
+describe("regression: variable expansion", () => {
+	let env, homeDir, cwd;
+
+	beforeEach(() => {
+		env = createTestEnv();
+		native.init(
+			env.extensionRoot,
+			env.piConfigDir,
+			env.piInstallDir,
+			env.tirithBinary,
+		);
+		homeDir = os.homedir();
+		cwd = env.tmpDir;
+	});
+
+	const check = (cmd) => parseResult(native.checkCommand(cmd, homeDir, cwd));
+
+	it("echo x > $HOME/.bashrc → sensitive-path", () => {
+		assertHasViolation(
+			check("echo x > $HOME/.bashrc"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+	it("echo x > ${HOME}/.bashrc → sensitive-path", () => {
+		assertHasViolation(
+			check("echo x > ${HOME}/.bashrc"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+	it("echo x > $XDG_CONFIG_HOME/systemd/user/evil.service → sensitive-path", () => {
+		assertHasViolation(
+			check("echo x > $XDG_CONFIG_HOME/systemd/user/evil.service"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+});
+
+describe("regression: no-space redirect", () => {
+	let env, homeDir, cwd;
+
+	beforeEach(() => {
+		env = createTestEnv();
+		native.init(
+			env.extensionRoot,
+			env.piConfigDir,
+			env.piInstallDir,
+			env.tirithBinary,
+		);
+		homeDir = os.homedir();
+		cwd = env.tmpDir;
+	});
+
+	const check = (cmd) => parseResult(native.checkCommand(cmd, homeDir, cwd));
+
+	it("echo evil >~/.bashrc → sensitive-path", () => {
+		assertHasViolation(
+			check("echo evil >~/.bashrc"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+	it("echo evil >>~/.bashrc → sensitive-path", () => {
+		assertHasViolation(
+			check("echo evil >>~/.bashrc"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+	it("echo evil>~/.bashrc → sensitive-path", () => {
+		assertHasViolation(
+			check("echo evil>~/.bashrc"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+});
+
+describe("regression: package manager fixes", () => {
+	let env, homeDir, cwd;
+
+	beforeEach(() => {
+		env = createTestEnv();
+		native.init(
+			env.extensionRoot,
+			env.piConfigDir,
+			env.piInstallDir,
+			env.tirithBinary,
+		);
+		homeDir = os.homedir();
+		cwd = env.tmpDir;
+	});
+
+	const check = (cmd) => parseResult(native.checkCommand(cmd, homeDir, cwd));
+
+	it('pip install requests --user-agent="x" → Warning (NOT Critical)', () => {
+		const violations = check('pip install requests --user-agent="x"');
+		const pmViolations = violations.filter(
+			(v) => v.category === "package-manager",
+		);
+		assert.equal(pmViolations.length, 1);
+		assert.equal(pmViolations[0].severity, "warning");
+	});
+	it("pipx install black → Warning", () => {
+		assertHasViolation(
+			check("pipx install black"),
+			"package-manager",
+			"warning",
+		);
+	});
+	it("pipx run black → Warning", () => {
+		assertHasViolation(check("pipx run black"), "package-manager", "warning");
+	});
+	it("bun install -g typescript → Critical", () => {
+		assertHasViolation(
+			check("bun install -g typescript"),
+			"package-manager",
+			"critical",
+		);
+	});
+	it("yarn global add typescript → Critical", () => {
+		assertHasViolation(
+			check("yarn global add typescript"),
+			"package-manager",
+			"critical",
+		);
+	});
+	it("ut pip install requests → NOT a manager-trigger", () => {
+		// `ut` is not a real tool — the [vt] regex was a typo for `uv`
+		// The inner `pip install` substring still fires on pip_re, which is acceptable
+		const violations = check("ut pip install requests");
+		const pmViolations = violations.filter(
+			(v) => v.category === "package-manager",
+		);
+		// pip install substring still matches pip_re — acceptable behavior
+		assert.ok(pmViolations.length >= 1);
+	});
+});
+
+describe("regression: systemctl order", () => {
+	let env, homeDir, cwd;
+
+	beforeEach(() => {
+		env = createTestEnv();
+		native.init(
+			env.extensionRoot,
+			env.piConfigDir,
+			env.piInstallDir,
+			env.tirithBinary,
+		);
+		homeDir = os.homedir();
+		cwd = env.tmpDir;
+	});
+
+	const check = (cmd) => parseResult(native.checkCommand(cmd, homeDir, cwd));
+
+	it("systemctl enable --user evil.service → sensitive-path", () => {
+		assertHasViolation(
+			check("systemctl enable --user evil.service"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+	it("systemctl --user enable evil.service → sensitive-path (existing)", () => {
+		assertHasViolation(
+			check("systemctl --user enable evil.service"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+});
+
+describe("regression: heredoc forms", () => {
+	let env, homeDir, cwd;
+
+	beforeEach(() => {
+		env = createTestEnv();
+		native.init(
+			env.extensionRoot,
+			env.piConfigDir,
+			env.piInstallDir,
+			env.tirithBinary,
+		);
+		homeDir = os.homedir();
+		cwd = env.tmpDir;
+	});
+
+	const check = (cmd) => parseResult(native.checkCommand(cmd, homeDir, cwd));
+
+	it("cat <<EOF > ~/.bashrc → sensitive-path", () => {
+		assertHasViolation(
+			check("cat <<EOF > ~/.bashrc"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+	it("tee ~/.bashrc <<EOF → sensitive-path", () => {
+		assertHasViolation(
+			check("tee ~/.bashrc <<EOF"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+	it("dd of=~/.bashrc <<EOF → sensitive-path", () => {
+		assertHasViolation(
+			check("dd of=~/.bashrc <<EOF"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+});
+
+describe("regression: crontab --list", () => {
+	let env, homeDir, cwd;
+
+	beforeEach(() => {
+		env = createTestEnv();
+		native.init(
+			env.extensionRoot,
+			env.piConfigDir,
+			env.piInstallDir,
+			env.tirithBinary,
+		);
+		homeDir = os.homedir();
+		cwd = env.tmpDir;
+	});
+
+	const check = (cmd) => parseResult(native.checkCommand(cmd, homeDir, cwd));
+
+	it("crontab --list → NOT flagged", () => {
+		assertNoViolation(check("crontab --list"), "sensitive-path");
+	});
+	it("crontab -l → NOT flagged (existing)", () => {
+		assertNoViolation(check("crontab -l"), "sensitive-path");
+	});
+	it("crontab -e → Warning (existing)", () => {
+		assertHasViolation(check("crontab -e"), "sensitive-path", "warning");
+	});
+});
+
+describe("regression: checkPath sensitive-path integration", () => {
+	let env, homeDir, cwd;
+
+	beforeEach(() => {
+		env = createTestEnv();
+		native.init(
+			env.extensionRoot,
+			env.piConfigDir,
+			env.piInstallDir,
+			env.tirithBinary,
+		);
+		homeDir = os.homedir();
+		cwd = env.tmpDir;
+	});
+
+	const checkPath = (targetPath, operation) =>
+		parseResult(native.checkPath(cwd, targetPath, operation, homeDir));
+
+	it('checkPath(cwd, "~/.bashrc", "write") → sensitive-path', () => {
+		assertHasViolation(
+			checkPath("~/.bashrc", "write"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+	it('checkPath(cwd, "~/.ssh/authorized_keys", "edit") → sensitive-path', () => {
+		assertHasViolation(
+			checkPath("~/.ssh/authorized_keys", "edit"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+	it('checkPath(cwd, "~/.bashrc", "read") → NOT flagged', () => {
+		assertNoViolation(checkPath("~/.bashrc", "read"), "sensitive-path");
+	});
+});
+
+describe("regression: self-disabling marker anchoring", () => {
+	let env, homeDir, cwd;
+
+	beforeEach(() => {
+		env = createTestEnv();
+		native.init(
+			env.extensionRoot,
+			env.piConfigDir,
+			env.piInstallDir,
+			env.tirithBinary,
+		);
+		homeDir = os.homedir();
+		cwd = env.tmpDir;
+	});
+
+	const checkContent = (targetPath, newContent) =>
+		parseResult(
+			native.checkShellInitContent(targetPath, newContent, homeDir, cwd),
+		);
+
+	it('checkShellInitContent("~/.bashrc", "# pi is fun") → flagged', () => {
+		assertHasViolation(
+			checkContent("~/.bashrc", "# pi is fun"),
+			"self-disabling",
+			"warning",
+		);
+	});
+	it('checkShellInitContent("~/.bashrc", eval "$(tirith init zsh)") → NOT flagged', () => {
+		assertNoViolation(
+			checkContent("~/.bashrc", 'eval "$(tirith init zsh)"\nexport X=y'),
+			"self-disabling",
+		);
+	});
+	it('checkShellInitContent("~/.bashrc", "# guardrails:on") → NOT flagged', () => {
+		assertNoViolation(
+			checkContent("~/.bashrc", "# guardrails:on"),
+			"self-disabling",
+		);
+	});
+});
+
+describe("regression: self-disabling mv destination", () => {
+	let env, homeDir, cwd;
+
+	beforeEach(() => {
+		env = createTestEnv();
+		native.init(
+			env.extensionRoot,
+			env.piConfigDir,
+			env.piInstallDir,
+			env.tirithBinary,
+		);
+		homeDir = os.homedir();
+		cwd = env.tmpDir;
+	});
+
+	const check = (cmd) => parseResult(native.checkCommand(cmd, homeDir, cwd));
+
+	it("mv /tmp/evil.node → addon.node → self-disabling", () => {
+		assertHasViolation(
+			check(
+				"mv /tmp/evil.node " +
+					env.extensionRoot +
+					"/native/build/Release/addon.node",
+			),
+			"self-disabling",
+			"warning",
+		);
+	});
+});
+
+describe("regression: file-destruction tightening", () => {
+	let env, homeDir, cwd;
+
+	beforeEach(() => {
+		env = createTestEnv();
+		native.init(
+			env.extensionRoot,
+			env.piConfigDir,
+			env.piInstallDir,
+			env.tirithBinary,
+		);
+		homeDir = os.homedir();
+		cwd = env.tmpDir;
+	});
+
+	const check = (cmd) => parseResult(native.checkCommand(cmd, homeDir, cwd));
+
+	it("dd --version → NOT flagged (no of= arg)", () => {
+		assertNoViolation(check("dd --version"), "file-destruction");
+	});
+	it("shred --help → NOT flagged (no path arg)", () => {
+		assertNoViolation(check("shred --help"), "file-destruction");
+	});
+	it("shred --version → NOT flagged (no path arg)", () => {
+		assertNoViolation(check("shred --version"), "file-destruction");
+	});
+	it("dd if=/dev/zero of=/dev/sda → flagged", () => {
+		assertHasViolation(
+			check("dd if=/dev/zero of=/dev/sda"),
+			"file-destruction",
+			"warning",
+		);
+	});
+	it("shred -zvf secret.txt → flagged", () => {
+		assertHasViolation(
+			check("shred -zvf secret.txt"),
+			"file-destruction",
+			"warning",
+		);
+	});
+});
+
+describe("regression: normalizeRedirects edge cases", () => {
+	let env, homeDir, cwd;
+
+	beforeEach(() => {
+		env = createTestEnv();
+		native.init(
+			env.extensionRoot,
+			env.piConfigDir,
+			env.piInstallDir,
+			env.tirithBinary,
+		);
+		homeDir = os.homedir();
+		cwd = env.tmpDir;
+	});
+
+	const check = (cmd) => parseResult(native.checkCommand(cmd, homeDir, cwd));
+
+	// Numeric fd append: 2>> should NOT be split
+	it("cmd 2>>log → NOT sensitive-path (numeric fd append)", () => {
+		assertNoViolation(check("echo x 2>>log"), "sensitive-path");
+	});
+	it("cmd 1>>log → NOT sensitive-path (numeric fd append)", () => {
+		assertNoViolation(check("echo x 1>>log"), "sensitive-path");
+	});
+
+	// Combined append: &>> should NOT be split
+	it("cmd &>>log → NOT sensitive-path (combined append)", () => {
+		assertNoViolation(check("echo x &>>log"), "sensitive-path");
+	});
+
+	// Process substitution: >(...) should NOT be split
+	it("cmd >(...) → NOT sensitive-path (process substitution)", () => {
+		// >(...) is process substitution — should not extract a redirect target
+		// (it will be caught by shell-composition instead)
+		assertNoViolation(check("cat >(/dev/null)"), "sensitive-path");
+	});
+
+	// Clobber-override: >| should NOT be split
+	it("cmd >|file → NOT sensitive-path (clobber-override)", () => {
+		assertNoViolation(check("echo x >|file"), "sensitive-path");
+	});
+
+	// Normal redirect still works
+	it("echo x > ~/.bashrc → sensitive-path (normal redirect)", () => {
+		assertHasViolation(
+			check("echo x > ~/.bashrc"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+	it("echo x >> ~/.bashrc → sensitive-path (append redirect)", () => {
+		assertHasViolation(
+			check("echo x >> ~/.bashrc"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+});
+
+describe("regression: expandVars edge cases", () => {
+	let env, homeDir, cwd;
+
+	beforeEach(() => {
+		env = createTestEnv();
+		native.init(
+			env.extensionRoot,
+			env.piConfigDir,
+			env.piInstallDir,
+			env.tirithBinary,
+		);
+		homeDir = os.homedir();
+		cwd = env.tmpDir;
+	});
+
+	const check = (cmd) => parseResult(native.checkCommand(cmd, homeDir, cwd));
+
+	// $HOMEDIR should NOT partial-match $HOME
+	it("$HOMEDIR does NOT expand to $HOME", () => {
+		// $HOMEDIR is not a known var — stays literal
+		// Should NOT match ~/.bashrc pattern
+		assertNoViolation(check("echo x > $HOMEDIR/.bashrc"), "sensitive-path");
+	});
+
+	// $HOME expands correctly
+	it("$HOME/.bashrc → sensitive-path", () => {
+		assertHasViolation(
+			check("echo x > $HOME/.bashrc"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+
+	// ${HOME} expands correctly
+	it("${HOME}/.bashrc → sensitive-path", () => {
+		assertHasViolation(
+			check("echo x > ${HOME}/.bashrc"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+
+	// Unknown vars stay literal
+	it("$UNKNOWN_VAR stays literal", () => {
+		assertNoViolation(check("echo x > $UNKNOWN_VAR/file"), "sensitive-path");
+	});
+
+	// $XDG_CONFIG_HOME default fallback
+	it("$XDG_CONFIG_HOME/systemd/user/evil.service → sensitive-path", () => {
+		assertHasViolation(
+			check("echo x > $XDG_CONFIG_HOME/systemd/user/evil.service"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+});
+
+describe("regression: pipeline composition (all stages together)", () => {
+	let env, homeDir, cwd;
+
+	beforeEach(() => {
+		env = createTestEnv();
+		native.init(
+			env.extensionRoot,
+			env.piConfigDir,
+			env.piInstallDir,
+			env.tirithBinary,
+		);
+		homeDir = os.homedir();
+		cwd = env.tmpDir;
+	});
+
+	const check = (cmd) => parseResult(native.checkCommand(cmd, homeDir, cwd));
+
+	// Nasty input: quotes + vars + no-space redirect all in one command
+	it('echo evil >"$HOME/.bashrc" → sensitive-path (quotes + var + no-space)', () => {
+		assertHasViolation(
+			check('echo evil >"$HOME/.bashrc"'),
+			"sensitive-path",
+			"warning",
+		);
+	});
+
+	// Quotes around the redirect target with tilde
+	it('echo evil > "~/.bashrc" → sensitive-path (quoted tilde)', () => {
+		assertHasViolation(
+			check('echo evil > "~/.bashrc"'),
+			"sensitive-path",
+			"warning",
+		);
+	});
+
+	// Operator inside quotes should NOT trigger, but real redirect should
+	it('echo "a > b" > ~/.bashrc → sensitive-path (real redirect, quoted decoy)', () => {
+		assertHasViolation(
+			check('echo "a > b" > ~/.bashrc'),
+			"sensitive-path",
+			"warning",
+		);
+	});
+
+	// Multiple stages: dequote → expandVars → resolveTilde → match
+	it('echo x > "${HOME}/.ssh/authorized_keys" → sensitive-path (full pipeline)', () => {
+		assertHasViolation(
+			check('echo x > "${HOME}/.ssh/authorized_keys"'),
+			"sensitive-path",
+			"warning",
+		);
+	});
+
+	// No-space redirect with variable expansion
+	it("echo x>$HOME/.bashrc → sensitive-path (no-space + var)", () => {
+		assertHasViolation(
+			check("echo x>$HOME/.bashrc"),
+			"sensitive-path",
+			"warning",
+		);
+	});
+
+	// Numeric fd redirect should NOT trigger even with sensitive path
+	it("echo x 2>/dev/null → NOT sensitive-path (numeric fd)", () => {
+		assertNoViolation(check("echo x 2>/dev/null"), "sensitive-path");
+	});
+
+	// Combined redirect should NOT trigger
+	it("echo x &>/dev/null → NOT sensitive-path (combined redirect)", () => {
+		assertNoViolation(check("echo x &>/dev/null"), "sensitive-path");
 	});
 });

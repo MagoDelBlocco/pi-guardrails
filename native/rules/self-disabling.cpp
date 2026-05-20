@@ -1,6 +1,7 @@
 #include "rule.h"
 #include <regex>
 #include <algorithm>
+#include <cctype>
 
 /*
  * Self-disabling protection (Warning, user prompt).
@@ -43,11 +44,12 @@ static bool isProtected(const std::string& resolvedPath) {
     return false;
 }
 
-// Resolve a path arg from a bash command: expand ~ then canonicalize relative to cwd.
+// Resolve a path arg from a bash command: dequote → expandVars → resolveTilde → canonicalize.
 static std::string resolveBashPath(const std::string& rawArg,
                                     const std::string& homeDir,
                                     const std::string& cwd) {
-    std::string expanded = resolveTilde(rawArg, homeDir);
+    std::string expanded = expandVars(rawArg, homeDir, cwd);
+    expanded = resolveTilde(expanded, homeDir);
     if (std::filesystem::path(expanded).is_absolute()) {
         return std::filesystem::weakly_canonical(expanded).string();
     }
@@ -106,8 +108,9 @@ std::vector<Violation> checkSelfDisablingPath(const std::string& targetPath,
     // Only block writes and edits, not reads.
     if (operation != "write" && operation != "edit") return violations;
 
-    // Resolve the target path.
-    std::string expanded = resolveTilde(targetPath, homeDir);
+    // Resolve the target path: expandVars → resolveTilde → canonicalize.
+    std::string expanded = expandVars(targetPath, homeDir, "");
+    expanded = resolveTilde(expanded, homeDir);
     std::filesystem::path resolved = std::filesystem::weakly_canonical(expanded);
     std::string resolvedStr = resolved.string();
 
@@ -177,9 +180,10 @@ std::vector<Violation> checkSelfDisablingCommand(const std::string& command,
 
     // ── tee to protected paths ────────────────────────────────
     {
+        std::string processed = dequote(command);
         static const std::regex tee_re("\\btee\\s+(?:-a\\s+)?(\\S+)");
         std::smatch m;
-        if (std::regex_search(command, m, tee_re)) {
+        if (std::regex_search(processed, m, tee_re)) {
             std::string target = m[1].str();
             std::string resolvedStr = resolveBashPath(target, homeDir, cwd);
 
@@ -213,6 +217,55 @@ static bool isShellInitFile(const std::string& resolvedPath,
     return false;
 }
 
+// Trim whitespace from both ends of a string.
+static std::string trim(const std::string& s) {
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
+// Convert string to lowercase.
+static std::string toLower(const std::string& s) {
+    std::string out = s;
+    for (char& c : out) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return out;
+}
+
+// Check if a line contains an accepted guardrail marker.
+static bool hasGuardrailMarker(const std::string& line) {
+    std::string trimmed = trim(line);
+    std::string lower = toLower(trimmed);
+
+    if (trimmed.empty()) return false;
+
+    // eval "$(tirith init ...)" — any tirith init eval form
+    if (lower.find("eval") != std::string::npos &&
+        lower.find("tirith init") != std::string::npos) {
+        return true;
+    }
+
+    // tirith init (bare command)
+    if (lower.find("tirith init") != std::string::npos) {
+        return true;
+    }
+
+    // source .../guardrails/... (explicit source line)
+    if (lower.find("source") != std::string::npos &&
+        lower.find("guardrails") != std::string::npos) {
+        return true;
+    }
+
+    // # guardrails:on (explicit user-controlled marker)
+    if (lower.find("# guardrails:on") != std::string::npos) {
+        return true;
+    }
+
+    return false;
+}
+
 std::vector<Violation> checkShellInitContent(const std::string& targetPath,
                                                const std::string& newContent,
                                                const std::string& homeDir,
@@ -225,11 +278,23 @@ std::vector<Violation> checkShellInitContent(const std::string& targetPath,
 
     if (!isShellInitFile(resolvedStr, homeDir)) return violations;
 
-    bool hasTirithInit = newContent.find("tirith init") != std::string::npos;
-    bool hasPiRef      = newContent.find("pi ") != std::string::npos;
-    bool hasExtension  = newContent.find("guardrails") != std::string::npos;
+    // Check each line for guardrail markers.
+    bool hasMarker = false;
+    {
+        size_t pos = 0;
+        while (pos < newContent.size()) {
+            size_t end = newContent.find('\n', pos);
+            if (end == std::string::npos) end = newContent.size();
+            std::string line = newContent.substr(pos, end - pos);
+            if (hasGuardrailMarker(line)) {
+                hasMarker = true;
+                break;
+            }
+            pos = end + 1;
+        }
+    }
 
-    if (newContent.empty() || (!hasTirithInit && !hasPiRef && !hasExtension)) {
+    if (newContent.empty() || !hasMarker) {
         violations.push_back({"self-disabling", Severity::WARNING,
             "Shell init rewrite: " + resolvedStr +
             " — new content may remove guardrail initialization lines"

@@ -82,9 +82,9 @@ std::vector<Violation> checkShellComposition(const std::string& command) {
 
     // ── Process substitution <(...) and >(...) ─────────────────
     // These embed command sequences that bypass static analysis.
-    // Check in quote-stripped form to avoid false positives inside strings.
+    // Check in blankQuoted form to avoid false positives inside strings.
     {
-        std::string stripped = stripQuotes(command);
+        std::string stripped = blankQuoted(command);
         if (stripped.find("<(") != std::string::npos ||
             stripped.find(">(") != std::string::npos) {
             violations.push_back({"shell-composition", Severity::CRITICAL,

@@ -14,9 +14,13 @@
 std::vector<Violation> checkProcessControl(const std::string& command) {
     std::vector<Violation> violations;
 
+    // Use blankQuoted so operators inside quotes are invisible.
+    // This prevents false positives like: echo "a & b"
+    std::string processed = blankQuoted(command);
+
     // kill / killall / pkill
     static const std::regex kill_re("\\b(kill|killall|pkill)\\b");
-    if (std::regex_search(command, kill_re)) {
+    if (std::regex_search(processed, kill_re)) {
         violations.push_back({
             "process-control",
             Severity::WARNING,
@@ -26,7 +30,7 @@ std::vector<Violation> checkProcessControl(const std::string& command) {
 
     // nohup
     static const std::regex nohup_re("\\bnohup\\b");
-    if (std::regex_search(command, nohup_re)) {
+    if (std::regex_search(processed, nohup_re)) {
         violations.push_back({
             "process-control",
             Severity::WARNING,
@@ -36,7 +40,7 @@ std::vector<Violation> checkProcessControl(const std::string& command) {
 
     // disown
     static const std::regex disown_re("\\bdisown\\b");
-    if (std::regex_search(command, disown_re)) {
+    if (std::regex_search(processed, disown_re)) {
         violations.push_back({
             "process-control",
             Severity::WARNING,
@@ -46,13 +50,13 @@ std::vector<Violation> checkProcessControl(const std::string& command) {
 
     // Background with & — but NOT && (chained), &> (redirect), or >& (fd redirect)
     // Strategy: scan for & not preceded/followed by &, >, or <
-    for (size_t i = 0; i < command.size(); ++i) {
-        if (command[i] == '&') {
-            bool prev_amp = (i > 0 && command[i - 1] == '&');
-            bool next_amp = (i + 1 < command.size() && command[i + 1] == '&');
-            bool next_gt  = (i + 1 < command.size() && command[i + 1] == '>');
-            bool prev_gt  = (i > 0 && command[i - 1] == '>');
-            bool prev_lt  = (i > 0 && command[i - 1] == '<');
+    for (size_t i = 0; i < processed.size(); ++i) {
+        if (processed[i] == '&') {
+            bool prev_amp = (i > 0 && processed[i - 1] == '&');
+            bool next_amp = (i + 1 < processed.size() && processed[i + 1] == '&');
+            bool next_gt  = (i + 1 < processed.size() && processed[i + 1] == '>');
+            bool prev_gt  = (i > 0 && processed[i - 1] == '>');
+            bool prev_lt  = (i > 0 && processed[i - 1] == '<');
 
             if (!prev_amp && !next_amp && !next_gt && !prev_gt && !prev_lt) {
                 violations.push_back({
