@@ -22,6 +22,9 @@ static std::set<std::string> protectedPaths;
 // Cache of protected path prefixes (for rm -rf parent detection).
 static std::vector<std::string> protectedPrefixes;
 
+// Cached extensions directory (parent of extensionRoot) for same-extension filtering.
+static std::string extensionsDir;
+
 static bool isProtected(const std::string& resolvedPath) {
     // Exact match.
     if (protectedPaths.count(resolvedPath)) return true;
@@ -44,18 +47,51 @@ static bool isProtected(const std::string& resolvedPath) {
     return false;
 }
 
+// Check if cwd and targetPath are in the same extension directory.
+// Returns true if both are under the same subdirectory of extensionsDir.
+static bool isSameExtension(const std::string& cwd, const std::string& targetPath) {
+    if (extensionsDir.empty()) return false;
+    std::string extSlash = extensionsDir;
+    if (extSlash.back() != '/') extSlash += '/';
+
+    // Both must be under extensionsDir.
+    if (cwd.compare(0, extSlash.size(), extSlash) != 0) return false;
+    if (targetPath.compare(0, extSlash.size(), extSlash) != 0) return false;
+
+    // Extract the first path component after extensionsDir for each.
+    std::filesystem::path cwdPath(cwd);
+    std::filesystem::path targetPathFs(targetPath);
+    std::filesystem::path extPath(extensionsDir);
+
+    auto cwdRel = std::filesystem::relative(cwdPath, extPath);
+    auto targetRel = std::filesystem::relative(targetPathFs, extPath);
+
+    // Get the first component (the extension directory name).
+    auto cwdFirst = cwdRel.begin();
+    auto targetFirst = targetRel.begin();
+    if (cwdFirst != cwdRel.end() && targetFirst != targetRel.end()) {
+        return cwdFirst->string() == targetFirst->string();
+    }
+    return false;
+}
+
 // Resolve a path arg from a bash command: dequote → expandVars → resolveTilde → canonicalize.
+// weakly_canonical can throw on permission-denied paths.
 static std::string resolveBashPath(const std::string& rawArg,
                                     const std::string& homeDir,
                                     const std::string& cwd) {
     std::string expanded = expandVars(rawArg, homeDir, cwd);
     expanded = resolveTilde(expanded, homeDir);
-    if (std::filesystem::path(expanded).is_absolute()) {
-        return std::filesystem::weakly_canonical(expanded).string();
+    try {
+        if (std::filesystem::path(expanded).is_absolute()) {
+            return std::filesystem::weakly_canonical(expanded).string();
+        }
+        return std::filesystem::weakly_canonical(
+            std::filesystem::path(cwd) / expanded
+        ).string();
+    } catch (const std::filesystem::filesystem_error&) {
+        return expanded;
     }
-    return std::filesystem::weakly_canonical(
-        std::filesystem::path(cwd) / expanded
-    ).string();
 }
 
 } // anonymous namespace
@@ -67,9 +103,18 @@ void initSelfDisabling(const std::string& extensionRoot,
     protectedPaths.clear();
     protectedPrefixes.clear();
 
+    // Cache the extensions directory (parent of extensionRoot) for same-extension filtering.
+    std::filesystem::path extRootPath(extensionRoot);
+    extensionsDir = extRootPath.parent_path().string();
+
     auto add = [](const std::string& p) {
         if (p.empty()) return;
-        std::filesystem::path resolved = std::filesystem::weakly_canonical(p);
+        std::filesystem::path resolved;
+        try {
+            resolved = std::filesystem::weakly_canonical(p);
+        } catch (const std::filesystem::filesystem_error&) {
+            resolved = std::filesystem::path(p);
+        }
         std::string s = resolved.string();
         protectedPaths.insert(s);
     };
@@ -83,8 +128,11 @@ void initSelfDisabling(const std::string& extensionRoot,
     add(extensionRoot + "/native/addon.cpp");
     add(extensionRoot + "/native/rules");
 
-    // Pi config directory and everything under it.
-    add(piConfigDir);
+    // Entire ~/.pi/ directory and everything under it.
+    // This covers: agent (extensions, sessions, skills), themes, etc.
+    std::filesystem::path piConfigDirPath(piConfigDir);
+    std::string piDir = piConfigDirPath.parent_path().string();
+    add(piDir);
 
     // Tirith binary.
     add(tirithBinary);
@@ -102,19 +150,29 @@ void initSelfDisabling(const std::string& extensionRoot,
 
 std::vector<Violation> checkSelfDisablingPath(const std::string& targetPath,
                                                const std::string& operation,
-                                               const std::string& homeDir) {
+                                               const std::string& homeDir,
+                                               const std::string& cwd) {
     std::vector<Violation> violations;
 
     // Only block writes and edits, not reads.
     if (operation != "write" && operation != "edit") return violations;
 
     // Resolve the target path: expandVars → resolveTilde → canonicalize.
+    // weakly_canonical can throw on permission-denied paths.
     std::string expanded = expandVars(targetPath, homeDir, "");
     expanded = resolveTilde(expanded, homeDir);
-    std::filesystem::path resolved = std::filesystem::weakly_canonical(expanded);
+    std::filesystem::path resolved;
+    try {
+        resolved = std::filesystem::weakly_canonical(expanded);
+    } catch (const std::filesystem::filesystem_error&) {
+        resolved = std::filesystem::path(expanded);
+    }
     std::string resolvedStr = resolved.string();
 
     if (isProtected(resolvedStr)) {
+        // Suppress if cwd and target are in the same extension directory.
+        if (isSameExtension(cwd, resolvedStr)) return violations;
+
         violations.push_back({"self-disabling", Severity::WARNING,
             "Blocked " + operation + " to protected path: " + resolvedStr});
     }
@@ -144,6 +202,8 @@ std::vector<Violation> checkSelfDisablingCommand(const std::string& command,
                 std::string resolvedStr = resolveBashPath(arg, homeDir, cwd);
 
                 if (isProtected(resolvedStr)) {
+                    // Suppress if cwd and target are in the same extension directory.
+                    if (isSameExtension(cwd, resolvedStr)) continue;
                     violations.push_back({"self-disabling", Severity::WARNING,
                         "Blocked " + cmdName + " on protected path: " + resolvedStr});
                 }
@@ -158,7 +218,7 @@ std::vector<Violation> checkSelfDisablingCommand(const std::string& command,
             std::string target = m[1].str();
             std::string resolvedStr = resolveBashPath(target, homeDir, cwd);
 
-            if (isProtected(resolvedStr)) {
+            if (isProtected(resolvedStr) && !isSameExtension(cwd, resolvedStr)) {
                 violations.push_back({"self-disabling", Severity::WARNING,
                     "Blocked dd to protected path: " + resolvedStr});
             }
@@ -172,6 +232,8 @@ std::vector<Violation> checkSelfDisablingCommand(const std::string& command,
             std::string resolvedStr = resolveBashPath(target, homeDir, cwd);
 
             if (isProtected(resolvedStr)) {
+                // Suppress if cwd and target are in the same extension directory.
+                if (isSameExtension(cwd, resolvedStr)) continue;
                 violations.push_back({"self-disabling", Severity::WARNING,
                     "Blocked redirect to protected path: " + resolvedStr});
             }
@@ -187,7 +249,7 @@ std::vector<Violation> checkSelfDisablingCommand(const std::string& command,
             std::string target = m[1].str();
             std::string resolvedStr = resolveBashPath(target, homeDir, cwd);
 
-            if (isProtected(resolvedStr)) {
+            if (isProtected(resolvedStr) && !isSameExtension(cwd, resolvedStr)) {
                 violations.push_back({"self-disabling", Severity::WARNING,
                     "Blocked tee to protected path: " + resolvedStr});
             }
@@ -211,7 +273,12 @@ static bool isShellInitFile(const std::string& resolvedPath,
 
     for (int i = 0; SHELL_INIT_PATTERNS[i] != nullptr; ++i) {
         std::string expanded = resolveTilde(SHELL_INIT_PATTERNS[i], homeDir);
-        std::filesystem::path p = std::filesystem::weakly_canonical(expanded);
+        std::filesystem::path p;
+        try {
+            p = std::filesystem::weakly_canonical(expanded);
+        } catch (const std::filesystem::filesystem_error&) {
+            p = std::filesystem::path(expanded);
+        }
         if (p.string() == resolvedPath) return true;
     }
     return false;
@@ -273,7 +340,12 @@ std::vector<Violation> checkShellInitContent(const std::string& targetPath,
     std::vector<Violation> violations;
 
     std::string expanded = resolveTilde(targetPath, homeDir);
-    std::filesystem::path resolved = std::filesystem::weakly_canonical(expanded);
+    std::filesystem::path resolved;
+    try {
+        resolved = std::filesystem::weakly_canonical(expanded);
+    } catch (const std::filesystem::filesystem_error&) {
+        resolved = std::filesystem::path(expanded);
+    }
     std::string resolvedStr = resolved.string();
 
     if (!isShellInitFile(resolvedStr, homeDir)) return violations;

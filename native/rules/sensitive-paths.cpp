@@ -45,13 +45,20 @@ static bool isSensitivePath(const std::string& rawPath, const std::string& homeD
     std::string expanded = expandVars(rawPath, homeDir, cwd);
     expanded = resolveTilde(expanded, homeDir);
     // Resolve relative paths against the command's cwd.
+    // weakly_canonical can throw on permission-denied paths (e.g. /var/spool/cron/crontabs/root).
+    // If resolution fails, fall back to the raw expanded path — the glob matcher
+    // can still match it, and we avoid crashing the process.
     std::filesystem::path resolved;
-    if (std::filesystem::path(expanded).is_absolute()) {
-        resolved = std::filesystem::weakly_canonical(expanded);
-    } else {
-        resolved = std::filesystem::weakly_canonical(
-            std::filesystem::path(cwd) / expanded
-        );
+    try {
+        if (std::filesystem::path(expanded).is_absolute()) {
+            resolved = std::filesystem::weakly_canonical(expanded);
+        } else {
+            resolved = std::filesystem::weakly_canonical(
+                std::filesystem::path(cwd) / expanded
+            );
+        }
+    } catch (const std::filesystem::filesystem_error&) {
+        resolved = std::filesystem::path(expanded);
     }
 
     for (int i = 0; SENSITIVE_PATTERNS[i] != nullptr; ++i) {

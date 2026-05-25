@@ -97,9 +97,11 @@ void initSelfDisabling(const std::string& extensionRoot,
 
 // Check a path-based tool call against self-disabling protected paths.
 // operation: "read" | "write" | "edit"
+// cwd: current working directory (used for same-extension filtering)
 std::vector<Violation> checkSelfDisablingPath(const std::string& targetPath,
                                                const std::string& operation,
-                                               const std::string& homeDir);
+                                               const std::string& homeDir,
+                                               const std::string& cwd);
 
 // Check a bash command against self-disabling protected paths.
 std::vector<Violation> checkSelfDisablingCommand(const std::string& command,

@@ -95,19 +95,31 @@ Napi::String CheckPath(const Napi::CallbackInfo& info) {
         if (wasAbsolute) {
             // Already absolute — skip cwd-escape check.
         } else {
-            std::filesystem::path cwdPath = std::filesystem::weakly_canonical(cwd);
+            // weakly_canonical can throw on permission-denied paths.
+            std::filesystem::path cwdPath;
+            try {
+                cwdPath = std::filesystem::weakly_canonical(cwd);
+            } catch (const std::filesystem::filesystem_error&) {
+                cwdPath = std::filesystem::path(cwd);
+            }
             std::filesystem::path expandedPath(expanded);
 
             std::filesystem::path target;
-            if (expandedPath.is_absolute()) {
-                // Expansion produced an absolute path (e.g. ~/foo → /home/user/foo).
-                // Resolve it directly.
-                target = std::filesystem::weakly_canonical(expanded);
-            } else {
-                // Still relative — resolve against cwd.
-                target = std::filesystem::weakly_canonical(
-                    std::filesystem::path(cwd) / expanded
-                );
+            try {
+                if (expandedPath.is_absolute()) {
+                    // Expansion produced an absolute path (e.g. ~/foo → /home/user/foo).
+                    // Resolve it directly.
+                    target = std::filesystem::weakly_canonical(expanded);
+                } else {
+                    // Still relative — resolve against cwd.
+                    target = std::filesystem::weakly_canonical(
+                        std::filesystem::path(cwd) / expanded
+                    );
+                }
+            } catch (const std::filesystem::filesystem_error&) {
+                target = expandedPath.is_absolute()
+                    ? std::filesystem::path(expanded)
+                    : std::filesystem::path(cwd) / expanded;
             }
 
             std::string targetStr = target.string();
@@ -124,7 +136,7 @@ Napi::String CheckPath(const Napi::CallbackInfo& info) {
 
     // ── Self-disabling check ──────────────────────────────────
     {
-        auto selfViolations = checkSelfDisablingPath(targetPath, operation, homeDir);
+        auto selfViolations = checkSelfDisablingPath(targetPath, operation, homeDir, cwd);
         all.insert(all.end(), selfViolations.begin(), selfViolations.end());
     }
 

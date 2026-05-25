@@ -142,19 +142,7 @@ function checkTirith(command: string): Violation[] | null {
 	return null;
 }
 
-// Filter out self-disabling violations when editing from within the
-// extension's own directory — the agent should be able to modify its own source.
-function filterSelfDisabling(
-	violations: Violation[] | null,
-	cwd: string,
-): Violation[] | null {
-	const isWithinExtension =
-		cwd === extensionRoot || cwd.startsWith(extensionRoot + path.sep);
-	if (!isWithinExtension) return violations;
-	if (!violations) return null;
-	const filtered = violations.filter((v) => v.category !== "self-disabling");
-	return filtered.length > 0 ? filtered : null;
-}
+
 
 function formatViolationPrompt(violations: Violation[]): string {
 	return violations
@@ -406,12 +394,33 @@ async function askConfirm(
 	return !!result;
 }
 
+// ── State ──────────────────────────────────────────────────────
+
+let autoDenialCount = 0;
+
 // ── Extension ──────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
-		ctx.ui.notify("Guardrails active", "info");
+		autoDenialCount = 0;
+		ctx.ui.setStatus(
+			"guardrails",
+			`│ ${ctx.ui.theme.bg("customMessageBg", ctx.ui.theme.fg("accent", "guardrails: active"))}`,
+		);
 	});
+
+	function updateStatus(ctx: {
+		ui: { setStatus: Function; theme: { bg: Function; fg: Function } };
+	}) {
+		const label =
+			autoDenialCount === 0
+				? "guardrails: active"
+				: `guardrails: ${autoDenialCount} auto-block${autoDenialCount !== 1 ? "s" : ""}`;
+		ctx.ui.setStatus(
+			"guardrails",
+			`│ ${ctx.ui.theme.bg("customMessageBg", ctx.ui.theme.fg("accent", label))}`,
+		);
+	}
 
 	pi.on("tool_call", async (event, ctx) => {
 		// ── Path-based tools: read, write, edit ────────────────
@@ -422,13 +431,10 @@ export default function (pi: ExtensionAPI) {
 		) {
 			const filePath = (event.input as { path?: string }).path;
 			if (filePath) {
-				const violations = filterSelfDisabling(
-					checkPathTool(
-						ctx.cwd,
-						filePath,
-						event.toolName as "read" | "write" | "edit",
-					),
+				const violations = checkPathTool(
 					ctx.cwd,
+					filePath,
+					event.toolName as "read" | "write" | "edit",
 				);
 
 				// ── Shell-init content check ─────────────────────
@@ -454,6 +460,8 @@ export default function (pi: ExtensionAPI) {
 									(v) => v.severity === "critical",
 								);
 								if (critical.length > 0) {
+									autoDenialCount++;
+									updateStatus(ctx);
 									return {
 										block: true,
 										reason: `Guardrail (auto-block): ${formatViolationPrompt(critical)}`,
@@ -482,6 +490,8 @@ export default function (pi: ExtensionAPI) {
 				if (violations) {
 					const critical = violations.filter((v) => v.severity === "critical");
 					if (critical.length > 0) {
+						autoDenialCount++;
+						updateStatus(ctx);
 						return {
 							block: true,
 							reason: `Guardrail (auto-block): ${formatViolationPrompt(critical)}`,
@@ -504,10 +514,7 @@ export default function (pi: ExtensionAPI) {
 			if (command) {
 				// Combine native guardrail checks with tirith URL analysis.
 				const violations: Violation[] = [];
-				const nativeViolations = filterSelfDisabling(
-					checkBashCommand(command, ctx.cwd),
-					ctx.cwd,
-				);
+				const nativeViolations = checkBashCommand(command, ctx.cwd);
 				if (nativeViolations) violations.push(...nativeViolations);
 				const tirithViolations = checkTirith(command);
 				if (tirithViolations) violations.push(...tirithViolations);
@@ -515,6 +522,8 @@ export default function (pi: ExtensionAPI) {
 				if (violations.length > 0) {
 					const critical = violations.filter((v) => v.severity === "critical");
 					if (critical.length > 0) {
+						autoDenialCount++;
+						updateStatus(ctx);
 						return {
 							block: true,
 							reason: `Guardrail (auto-block): ${formatViolationPrompt(critical)}`,
