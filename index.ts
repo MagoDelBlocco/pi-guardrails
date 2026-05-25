@@ -280,6 +280,7 @@ class ConfirmComponent implements Component {
 		const innerWidth = Math.max(1, width - BOX_BORDER_OVERHEAD);
 		const borderColor = (s: string) => this.theme.fg("accent", s);
 		const titleColor = (s: string) => this.theme.fg("dim", this.theme.bold(s));
+		const bgFn = (s: string) => this.theme.bg("selectedBg", s);
 
 		// Build inner content
 		const lines: string[] = [];
@@ -327,13 +328,13 @@ class ConfirmComponent implements Component {
 			(s: string) => this.theme.fg("dim", s),
 		).render(width)[0];
 
-		const bordered = lines.map((line, index) => {
-			if (index === 0 || index === lines.length - 1) return line;
+		const bordered = lines.map((line) => {
 			const padded = truncateToWidth(line, innerWidth, "", true);
-			return `${borderColor(BOX_BORDER_LEFT)}${padded}${borderColor(BOX_BORDER_RIGHT)}`;
+			const fullLine = `${borderColor(BOX_BORDER_LEFT)}${padded}${borderColor(BOX_BORDER_RIGHT)}`;
+			return bgFn(fullLine);
 		});
 
-		return [firstBorder, ...bordered, lastBorder];
+		return [bgFn(firstBorder), ...bordered, bgFn(lastBorder)];
 	}
 
 	handleInput(data: string): void {
