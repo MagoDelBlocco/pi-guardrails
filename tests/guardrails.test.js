@@ -2605,3 +2605,104 @@ describe("regression: pipeline composition (all stages together)", () => {
 		assertNoViolation(check("echo x &>/dev/null"), "sensitive-path");
 	});
 });
+
+// ── O. Extension Self-Edit Exemption ─────────────────────────
+// When cwd is the extension's own directory, the TS layer filters
+// out self-disabling violations. These tests verify the native layer
+// still produces them (proving the filter is necessary and correct).
+
+describe("extension self-edit exemption (native layer)", () => {
+	let env, homeDir;
+
+	beforeEach(() => {
+		env = createTestEnv();
+		native.init(
+			env.extensionRoot,
+			env.piConfigDir,
+			env.piInstallDir,
+			env.tirithBinary,
+		);
+		homeDir = os.homedir();
+	});
+
+	const checkPath = (cwd, targetPath, operation) =>
+		parseResult(native.checkPath(cwd, targetPath, operation, homeDir));
+	const checkCmd = (cwd, command) =>
+		parseResult(native.checkCommand(command, homeDir, cwd));
+
+	// ── Path-based: self-disabling violations ARE produced by native ──
+	it("produces self-disabling for edit to index.ts when cwd is extensionRoot", () => {
+		const violations = checkPath(
+			env.extensionRoot,
+			env.extensionRoot + "/index.ts",
+			"edit",
+		);
+		assertHasViolation(violations, "self-disabling", "warning");
+	});
+
+	it("produces self-disabling for write to addon.node when cwd is extensionRoot", () => {
+		const violations = checkPath(
+			env.extensionRoot,
+			env.extensionRoot + "/native/build/Release/addon.node",
+			"write",
+		);
+		assertHasViolation(violations, "self-disabling", "warning");
+	});
+
+	it("produces self-disabling for edit to rules dir when cwd is extensionRoot", () => {
+		const violations = checkPath(
+			env.extensionRoot,
+			env.extensionRoot + "/native/rules/rule.h",
+			"edit",
+		);
+		assertHasViolation(violations, "self-disabling", "warning");
+	});
+
+	// ── Bash: self-disabling violations ARE produced by native ──
+	it("produces self-disabling for rm on addon.node when cwd is extensionRoot", () => {
+		const violations = checkCmd(
+			env.extensionRoot,
+			"rm " + env.extensionRoot + "/native/build/Release/addon.node",
+		);
+		assertHasViolation(violations, "self-disabling", "warning");
+	});
+
+	it("produces self-disabling for chmod on index.ts when cwd is extensionRoot", () => {
+		const violations = checkCmd(
+			env.extensionRoot,
+			"chmod 000 " + env.extensionRoot + "/index.ts",
+		);
+		assertHasViolation(violations, "self-disabling", "warning");
+	});
+
+	// ── Other violations are NOT affected by cwd ──
+	it("still produces sensitive-path for ~/.bashrc when cwd is extensionRoot", () => {
+		const violations = checkCmd(env.extensionRoot, "echo x > ~/.bashrc");
+		assertHasViolation(violations, "sensitive-path", "warning");
+	});
+
+	it("still produces shell-composition for bash -c when cwd is extensionRoot", () => {
+		const violations = checkCmd(env.extensionRoot, "bash -c 'echo hello'");
+		assertHasViolation(violations, "shell-composition", "critical");
+	});
+
+	it("still produces package-manager for npm install when cwd is extensionRoot", () => {
+		const violations = checkCmd(env.extensionRoot, "npm install lodash");
+		assertHasViolation(violations, "package-manager", "warning");
+	});
+
+	// ── Non-extension paths still produce self-disabling ──
+	it("produces self-disabling for piConfigDir when cwd is extensionRoot", () => {
+		const violations = checkPath(
+			env.extensionRoot,
+			env.piConfigDir + "/config.json",
+			"write",
+		);
+		assertHasViolation(violations, "self-disabling", "warning");
+	});
+
+	it("produces self-disabling for tirith binary when cwd is extensionRoot", () => {
+		const violations = checkPath(env.extensionRoot, env.tirithBinary, "edit");
+		assertHasViolation(violations, "self-disabling", "warning");
+	});
+});

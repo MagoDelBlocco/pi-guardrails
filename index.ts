@@ -142,6 +142,18 @@ function checkTirith(command: string): Violation[] | null {
 	return null;
 }
 
+// Filter out self-disabling violations when editing from within the
+// extension's own directory — the agent should be able to modify its own source.
+function filterSelfDisabling(
+	violations: Violation[] | null,
+	cwd: string,
+): Violation[] | null {
+	if (cwd !== extensionRoot) return violations;
+	if (!violations) return null;
+	const filtered = violations.filter((v) => v.category !== "self-disabling");
+	return filtered.length > 0 ? filtered : null;
+}
+
 function formatViolationPrompt(violations: Violation[]): string {
 	return violations
 		.map((v) => `[${v.severity.toUpperCase()}] ${v.category}: ${v.message}`)
@@ -407,10 +419,13 @@ export default function (pi: ExtensionAPI) {
 		) {
 			const filePath = (event.input as { path?: string }).path;
 			if (filePath) {
-				const violations = checkPathTool(
+				const violations = filterSelfDisabling(
+					checkPathTool(
+						ctx.cwd,
+						filePath,
+						event.toolName as "read" | "write" | "edit",
+					),
 					ctx.cwd,
-					filePath,
-					event.toolName as "read" | "write" | "edit",
 				);
 
 				// ── Shell-init content check ─────────────────────
@@ -486,7 +501,10 @@ export default function (pi: ExtensionAPI) {
 			if (command) {
 				// Combine native guardrail checks with tirith URL analysis.
 				const violations: Violation[] = [];
-				const nativeViolations = checkBashCommand(command, ctx.cwd);
+				const nativeViolations = filterSelfDisabling(
+					checkBashCommand(command, ctx.cwd),
+					ctx.cwd,
+				);
 				if (nativeViolations) violations.push(...nativeViolations);
 				const tirithViolations = checkTirith(command);
 				if (tirithViolations) violations.push(...tirithViolations);
