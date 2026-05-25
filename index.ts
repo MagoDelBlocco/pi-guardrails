@@ -148,7 +148,9 @@ function filterSelfDisabling(
 	violations: Violation[] | null,
 	cwd: string,
 ): Violation[] | null {
-	if (cwd !== extensionRoot) return violations;
+	const isWithinExtension =
+		cwd === extensionRoot || cwd.startsWith(extensionRoot + path.sep);
+	if (!isWithinExtension) return violations;
 	if (!violations) return null;
 	const filtered = violations.filter((v) => v.category !== "self-disabling");
 	return filtered.length > 0 ? filtered : null;
