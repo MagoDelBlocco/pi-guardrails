@@ -77,15 +77,39 @@ Napi::String CheckPath(const Napi::CallbackInfo& info) {
     std::vector<Violation> all;
 
     // ── Cwd-escape check ──────────────────────────────────────
-    // Only flag relative paths that use .. to traverse outside cwd.
-    // Absolute paths are explicit — caught by sensitive-path / self-disabling rules.
+    // Expand ~ and shell variables ($HOME, $PWD) before resolving, so that
+    // paths like "~/foo" or "$HOME/foo" are not treated as relative to cwd.
+    // Bare absolute paths (starting with /) are skipped — they are explicit
+    // and caught by sensitive-path / self-disabling rules instead.
     {
         std::filesystem::path rawTarget(targetPath);
-        if (!rawTarget.is_absolute()) {
+        bool wasAbsolute = rawTarget.is_absolute();
+
+        // Expand variables and tilde before canonicalization.
+        std::string expanded = expandVars(targetPath, homeDir, cwd);
+        expanded = resolveTilde(expanded, homeDir);
+
+        // Skip bare absolute paths (existing design: caught by other rules).
+        // But if expansion turned a non-absolute path into an absolute one
+        // (e.g. "~/foo" → "/home/user/foo"), we still check it.
+        if (wasAbsolute) {
+            // Already absolute — skip cwd-escape check.
+        } else {
             std::filesystem::path cwdPath = std::filesystem::weakly_canonical(cwd);
-            std::filesystem::path target  = std::filesystem::weakly_canonical(
-                std::filesystem::path(cwd) / targetPath
-            );
+            std::filesystem::path expandedPath(expanded);
+
+            std::filesystem::path target;
+            if (expandedPath.is_absolute()) {
+                // Expansion produced an absolute path (e.g. ~/foo → /home/user/foo).
+                // Resolve it directly.
+                target = std::filesystem::weakly_canonical(expanded);
+            } else {
+                // Still relative — resolve against cwd.
+                target = std::filesystem::weakly_canonical(
+                    std::filesystem::path(cwd) / expanded
+                );
+            }
+
             std::string targetStr = target.string();
             std::string cwdStr    = cwdPath.string();
             if (cwdStr.back() != '/') cwdStr += '/';

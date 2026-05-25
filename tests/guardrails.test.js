@@ -1304,6 +1304,81 @@ describe("path-escape (checkPath)", () => {
 		);
 		assertNoViolation(violations, "path-escape");
 	});
+
+	// ── Tilde expansion bypass (regression) ────────────────────
+	it("detects ~/ escape outside cwd", () => {
+		const violations = checkPath(
+			"/home/user/project",
+			"~/other/file.txt",
+			"read",
+		);
+		assertHasViolation(violations, "path-escape", "warning");
+	});
+	it("detects ~/ escape on write", () => {
+		const violations = checkPath(
+			"/home/user/project",
+			"~/other/file.txt",
+			"write",
+		);
+		assertHasViolation(violations, "path-escape", "warning");
+	});
+	it("detects ~/ escape on edit", () => {
+		const violations = checkPath(
+			"/home/user/project",
+			"~/other/file.txt",
+			"edit",
+		);
+		assertHasViolation(violations, "path-escape", "warning");
+	});
+
+	// ── $HOME variable expansion bypass (regression) ───────────
+	it("detects $HOME escape outside cwd", () => {
+		const violations = checkPath(
+			"/home/user/project",
+			"$HOME/other/file.txt",
+			"read",
+		);
+		assertHasViolation(violations, "path-escape", "warning");
+	});
+	it("detects ${HOME} escape outside cwd", () => {
+		const violations = checkPath(
+			"/home/user/project",
+			"${HOME}/other/file.txt",
+			"edit",
+		);
+		assertHasViolation(violations, "path-escape", "warning");
+	});
+
+	// ── $PWD variable expansion ────────────────────────────────
+	// $PWD expands to the real process cwd (from env), which in practice
+	// always equals the agent's cwd. So $PWD/src/file.txt is always safe.
+	// We can't test with a synthetic cwd because expandVars reads the real env.
+
+	// ── Deep .. traversal (regression) ─────────────────────────
+	it("detects ./abc/../../../dbc escape", () => {
+		const violations = checkPath(
+			"/home/user/project",
+			"./abc/../../../dbc",
+			"read",
+		);
+		assertHasViolation(violations, "path-escape", "warning");
+	});
+	it("detects deeply nested ../ escape", () => {
+		const violations = checkPath(
+			"/home/user/project",
+			"a/b/c/../../../../etc/passwd",
+			"read",
+		);
+		assertHasViolation(violations, "path-escape", "warning");
+	});
+	it("allows ./abc/../abc/file.txt (stays inside cwd)", () => {
+		const violations = checkPath(
+			"/home/user/project",
+			"./abc/../abc/file.txt",
+			"read",
+		);
+		assertNoViolation(violations, "path-escape");
+	});
 });
 
 // ── H. JSON Output Format ──────────────────────────────────────
